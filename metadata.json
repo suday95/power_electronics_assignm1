@@ -1,0 +1,6 @@
+{
+  "name": "RectifierLab - Power Electronics Converter Simulation",
+  "description": "Interactive Single-Phase and Three-Phase Diode & Thyristor Rectifier Simulator with real-time circuit schematics, dynamic waveform oscilloscope, and load analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
