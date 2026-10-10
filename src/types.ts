@@ -7,8 +7,9 @@ export interface CircuitParams {
   phase: PhaseType;
   rectifierType: RectifierType;
   deviceType: DeviceType;
+  deviceOverrides?: Record<number, DeviceType>; // per-device type (keyed by device number) overriding deviceType
   loadType: LoadType;
-  vRms: number;        // Supply RMS voltage (V), e.g. 230V
+  vRms: number;        // Supply RMS voltage (V): phase voltage for 1Φ, line-to-line for 3Φ
   freq: number;        // Frequency (Hz), e.g. 50Hz
   firingAngle: number; // Alpha (deg), 0 - 180°
   hasFwd: boolean;     // Freewheeling Diode
@@ -24,26 +25,36 @@ export interface WaveformPoint {
   vsB?: number;        // Phase B for 3-phase
   vsC?: number;        // Phase C for 3-phase
   vo: number;          // Output rectified voltage
-  is: number;          // Input supply current
+  is: number;          // Input supply current (phase A for 3-phase)
   io: number;          // Output load current
-  gatePulses: boolean; // True when firing pulse is active
+  gatePulses: boolean; // True when a firing pulse is active
+  gateDevices: string[];   // Devices receiving a gate pulse at this instant
   activeDevices: string[]; // e.g. ['T1', 'T2'] or ['D1'] or ['D_FW']
   loopDescription: string;
 }
 
+export interface GateEvent {
+  deg: number;         // firing instant within one cycle (0 - 360)
+  devices: string[];
+}
+
 export interface PerformanceMetrics {
-  vm: number;          // Peak supply voltage
+  vm: number;          // Peak phase voltage
   vAvg: number;        // Average DC output voltage
   vRms: number;        // RMS output voltage
   iAvg: number;        // Average load current
   iRms: number;        // RMS load current
   rippleFactor: number;// RF = sqrt((Vrms/Vavg)^2 - 1)
   formFactor: number;  // FF = Vrms / Vavg
-  efficiency: number;  // Rectification efficiency eta (%)
+  efficiency: number;  // Rectification efficiency eta = Pdc / Pac (%)
   thdCurrent: number;  // Supply current THD (%)
-  powerFactor: number; // Approximate input displacement/power factor
+  powerFactor: number; // True input power factor
+  dpf: number;         // Displacement power factor cos(phi1)
+  isRms: number;       // RMS supply (line) current
   rippleFreq: number;  // Dominant ripple frequency (Hz)
   pulseNumber: number; // 1, 2, 3, or 6 pulse
+  continuous: boolean; // Load current never reaches zero
+  theoryVdc: number | null; // Ideal closed-form V_dc, null when no closed form applies
 }
 
 export interface HarmonicItem {
@@ -54,4 +65,12 @@ export interface HarmonicItem {
   voltagePercent: number;
   currentMag: number;
   currentPercent: number;
+}
+
+export interface SimulationResult {
+  points: WaveformPoint[];
+  metrics: PerformanceMetrics;
+  harmonics: HarmonicItem[];
+  gateEvents: GateEvent[];
+  stepDeg: number;
 }

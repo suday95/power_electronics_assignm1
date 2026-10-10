@@ -1,6 +1,7 @@
 import React from 'react';
 import { CircuitParams } from '../types';
-import { X, Sparkles, Check, ArrowRight } from 'lucide-react';
+import { Modal } from './Modal';
+import { ArrowRight, Sparkles } from 'lucide-react';
 
 interface PresetsModalProps {
   isOpen: boolean;
@@ -16,199 +17,117 @@ interface PresetItem {
   params: CircuitParams;
 }
 
-const PRESETS: PresetItem[] = [
+const base: CircuitParams = {
+  phase: '1phase',
+  rectifierType: 'fullwave',
+  deviceType: 'thyristor',
+  loadType: 'RL',
+  vRms: 230,
+  freq: 50,
+  firingAngle: 45,
+  hasFwd: false,
+  r: 20,
+  l: 100,
+  e: 0
+};
+
+export const PRESETS: PresetItem[] = [
   {
     id: '1ph-diode-r',
     name: '1Φ Diode Full-Bridge (Resistive)',
     category: 'Single-Phase Diode',
-    description: 'Standard 4-diode Graetz bridge with pure R load (R = 20 Ω). Classic baseline.',
-    params: {
-      phase: '1phase',
-      rectifierType: 'fullwave',
-      deviceType: 'diode',
-      loadType: 'R',
-      vRms: 230,
-      freq: 50,
-      firingAngle: 0,
-      hasFwd: false,
-      r: 20,
-      l: 45,
-      e: 0
-    }
+    description: 'Standard 4-diode Graetz bridge with a pure R load (R = 20 Ω). V_dc = 2V_m/π ≈ 207 V.',
+    params: { ...base, deviceType: 'diode', loadType: 'R', firingAngle: 0 }
   },
   {
     id: '1ph-scr-rl-45',
-    name: '1Φ Controlled Bridge (RL Load, α=45°)',
+    name: '1Φ Controlled Bridge (RL load, α = 45°)',
     category: 'Controlled Converters',
-    description: 'Continuous conduction mode showing negative voltage swings due to inductive kickback.',
-    params: {
-      phase: '1phase',
-      rectifierType: 'fullwave',
-      deviceType: 'thyristor',
-      loadType: 'RL',
-      vRms: 230,
-      freq: 50,
-      firingAngle: 45,
-      hasFwd: false,
-      r: 20,
-      l: 45,
-      e: 0
-    }
+    description: 'Continuous conduction: v_o swings negative between 180° and 225° while the inductor keeps the current flowing. V_dc = (2V_m/π)·cos α.',
+    params: { ...base }
   },
   {
     id: '1ph-scr-fwd',
-    name: '1Φ Controlled Bridge + Freewheeling Diode',
+    name: '1Φ Controlled Bridge + Freewheeling Diode (α = 60°)',
     category: 'Controlled Converters',
-    description: 'FWD clamps output voltage to 0V during negative cycle, preventing inversion.',
-    params: {
-      phase: '1phase',
-      rectifierType: 'fullwave',
-      deviceType: 'thyristor',
-      loadType: 'RL',
-      vRms: 230,
-      freq: 50,
-      firingAngle: 60,
-      hasFwd: true,
-      r: 20,
-      l: 60,
-      e: 0
-    }
+    description: 'The FWD clamps v_o to 0 V instead of letting it go negative, raising V_dc to (V_m/π)(1 + cos α).',
+    params: { ...base, firingAngle: 60, hasFwd: true, l: 60 }
+  },
+  {
+    id: '1ph-semi',
+    name: '1Φ Semi-Converter (T1, T3 + D2, D4, α = 45°)',
+    category: 'Controlled Converters',
+    description: 'Half-controlled bridge: the bridge itself freewheels (T + D on the same leg), so v_o never goes negative.',
+    params: { ...base, l: 45, deviceOverrides: { 2: 'diode', 4: 'diode' } }
   },
   {
     id: '3ph-diode-bridge',
-    name: '3Φ 6-Pulse Diode Bridge (Industrial DC)',
+    name: '3Φ 6-Pulse Diode Bridge (400 V L-L)',
     category: 'Three-Phase',
-    description: 'Standard heavy industrial converter (6 pulses per cycle, very low 4% ripple).',
-    params: {
-      phase: '3phase',
-      rectifierType: 'fullwave',
-      deviceType: 'diode',
-      loadType: 'RL',
-      vRms: 400,
-      freq: 50,
-      firingAngle: 0,
-      hasFwd: false,
-      r: 15,
-      l: 40,
-      e: 0
-    }
+    description: 'Industrial 6-pulse rectifier: V_dc = 1.35·V_LL ≈ 540 V with only ≈ 4% ripple at 300 Hz.',
+    params: { ...base, phase: '3phase', deviceType: 'diode', vRms: 400, firingAngle: 0, r: 15, l: 40 }
   },
   {
     id: '3ph-scr-bridge-30',
-    name: '3Φ Controlled Converter (α=30°)',
+    name: '3Φ Controlled Converter (α = 30°)',
     category: 'Three-Phase',
-    description: 'Phase-controlled 6-pulse Graetz converter with variable DC output voltage.',
-    params: {
-      phase: '3phase',
-      rectifierType: 'fullwave',
-      deviceType: 'thyristor',
-      loadType: 'RL',
-      vRms: 400,
-      freq: 50,
-      firingAngle: 30,
-      hasFwd: false,
-      r: 15,
-      l: 50,
-      e: 0
-    }
+    description: 'Phase-controlled 6-pulse Graetz converter, V_dc = 1.35·V_LL·cos α ≈ 468 V.',
+    params: { ...base, phase: '3phase', vRms: 400, firingAngle: 30, r: 15, l: 50 }
+  },
+  {
+    id: '3ph-halfwave',
+    name: '3Φ Half-Wave Diode Rectifier (3-pulse)',
+    category: 'Three-Phase',
+    description: 'Three diodes to a star point. Each conducts 120°; ripple frequency is 3f = 150 Hz.',
+    params: { ...base, phase: '3phase', rectifierType: 'halfwave', deviceType: 'diode', vRms: 400, firingAngle: 0, r: 15, l: 40 }
   },
   {
     id: '1ph-halfwave-diode',
     name: '1Φ Half-Wave Diode Rectifier',
     category: 'Half-Wave',
-    description: 'Single diode conducting only during positive half-cycle (31.8% average output).',
-    params: {
-      phase: '1phase',
-      rectifierType: 'halfwave',
-      deviceType: 'diode',
-      loadType: 'R',
-      vRms: 230,
-      freq: 50,
-      firingAngle: 0,
-      hasFwd: false,
-      r: 25,
-      l: 30,
-      e: 0
-    }
+    description: 'A single diode conducting during the positive half-cycle only: V_dc = V_m/π (31.8% of V_m).',
+    params: { ...base, rectifierType: 'halfwave', deviceType: 'diode', loadType: 'R', firingAngle: 0, r: 25 }
   },
   {
     id: '1ph-rle-battery',
-    name: 'Battery Charger (RLE Load with Back-EMF)',
+    name: 'Battery Charger (RLE load, E = 48 V)',
     category: 'Special Loads',
-    description: 'Rectifier charging a battery bank (Back-EMF E = 48V, R = 10 Ω, L = 20 mH).',
-    params: {
-      phase: '1phase',
-      rectifierType: 'fullwave',
-      deviceType: 'thyristor',
-      loadType: 'RLE',
-      vRms: 110,
-      freq: 50,
-      firingAngle: 30,
-      hasFwd: true,
-      r: 10,
-      l: 20,
-      e: 48
-    }
+    description: 'Discontinuous conduction: the thyristors only conduct while v_s > E, and v_o sits at E while the bridge blocks.',
+    params: { ...base, loadType: 'RLE', vRms: 110, firingAngle: 30, hasFwd: true, r: 10, l: 20, e: 48 }
   }
 ];
 
-export const PresetsModal: React.FC<PresetsModalProps> = ({
-  isOpen,
-  onClose,
-  onApplyPreset
-}) => {
-  if (!isOpen) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-700/80 rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col shadow-2xl">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950/70">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-              <Sparkles className="w-5 h-5" />
+export const PresetsModal: React.FC<PresetsModalProps> = ({ isOpen, onClose, onApplyPreset }) => (
+  <Modal
+    isOpen={isOpen}
+    onClose={onClose}
+    title="Lab Presets & Experiments"
+    subtitle="Load common power electronics benchmark circuits"
+    icon={<Sparkles className="w-5 h-5" />}
+    widthClass="max-w-2xl"
+  >
+    <div className="space-y-3">
+      {PRESETS.map(preset => (
+        <button
+          key={preset.id}
+          onClick={() => {
+            onApplyPreset(preset.params);
+            onClose();
+          }}
+          className="w-full text-left p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 hover:border-cyan-500/50 hover:bg-slate-800/40 transition-all flex items-center justify-between gap-3 group"
+        >
+          <div className="space-y-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-bold text-slate-100 group-hover:text-cyan-300 transition-colors">{preset.name}</span>
+              <span className="px-2 py-0.5 text-[9px] font-mono rounded bg-slate-800 text-slate-400 border border-slate-700">{preset.category}</span>
             </div>
-            <div>
-              <h2 className="text-base font-bold text-slate-100">Lab Presets & Experiments</h2>
-              <p className="text-xs text-slate-400">Load common power electronics benchmark circuits</p>
-            </div>
+            <p className="text-xs text-slate-400">{preset.description}</p>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-100 bg-slate-800/60 hover:bg-slate-800 rounded-lg transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <div className="p-6 overflow-y-auto space-y-3">
-          {PRESETS.map(preset => (
-            <div
-              key={preset.id}
-              onClick={() => {
-                onApplyPreset(preset.params);
-                onClose();
-              }}
-              className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 hover:border-cyan-500/50 hover:bg-slate-800/40 cursor-pointer transition-all flex items-center justify-between group"
-            >
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-slate-100 group-hover:text-cyan-300 transition-colors">
-                    {preset.name}
-                  </span>
-                  <span className="px-2 py-0.5 text-[9px] font-mono rounded bg-slate-800 text-slate-400 border border-slate-700">
-                    {preset.category}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-400">{preset.description}</p>
-              </div>
-
-              <div className="p-2 rounded-lg bg-slate-800 text-slate-400 group-hover:text-cyan-400 group-hover:bg-cyan-950/60 transition-colors">
-                <ArrowRight className="w-4 h-4" />
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
+          <div className="p-2 rounded-lg bg-slate-800 text-slate-400 group-hover:text-cyan-400 group-hover:bg-cyan-950/60 transition-colors shrink-0">
+            <ArrowRight className="w-4 h-4" />
+          </div>
+        </button>
+      ))}
     </div>
-  );
-};
+  </Modal>
+);

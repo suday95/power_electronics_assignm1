@@ -1,684 +1,488 @@
-import React from 'react';
+import React, { useMemo, useRef } from 'react';
 import { CircuitParams, WaveformPoint } from '../types';
-import { Maximize2, Zap, Radio, Cpu, RefreshCw } from 'lucide-react';
+import { controlMode, deviceTypeOf } from '../engine/simulationMath';
+import { useElementFullscreen } from '../hooks';
+import { Cpu, Lightbulb, Maximize2, Minimize2, Zap } from 'lucide-react';
 
 interface CircuitSchematicProps {
   params: CircuitParams;
   currentPoint: WaveformPoint;
-  onToggleDeviceType?: () => void;
-  onToggleFwd?: () => void;
-  isFullScreen?: boolean;
-  onToggleFullScreen?: () => void;
+  isPlaying: boolean;
+  onToggleDevice: (n: number) => void;
+  onToggleFwd: () => void;
 }
 
-export const CircuitSchematic: React.FC<CircuitSchematicProps> = ({
-  params,
-  currentPoint,
-  onToggleDeviceType,
-  onToggleFwd,
-  isFullScreen,
-  onToggleFullScreen
-}) => {
-  const { phase, rectifierType, deviceType, loadType, hasFwd, r, l, e } = params;
-  const isThyristor = deviceType === 'thyristor';
-  const activeDevs = currentPoint.activeDevices;
-  const isFwdActive = activeDevs.includes('D_FW');
+type Pt = [number, number];
 
-  // Format instantaneous values
-  const vsText = `${currentPoint.vs >= 0 ? '+' : ''}${currentPoint.vs.toFixed(1)} V`;
-  const voText = `${currentPoint.vo >= 0 ? '+' : ''}${currentPoint.vo.toFixed(1)} V`;
-  const ioText = `${currentPoint.io >= 0 ? '+' : ''}${currentPoint.io.toFixed(2)} A`;
+const TOP = 110;
+const BOT = 350;
+const LX = 650; // load branch x
+const FX = 550; // freewheeling diode branch x
 
-  // Determine topology badge text
-  const topologyBadge = `${phase === '1phase' ? '1-PHASE' : '3-PHASE'} ${
-    rectifierType === 'fullwave' ? 'FULL-BRIDGE' : 'HALF-WAVE'
-  }`;
+interface DeviceSpec {
+  n: number;
+  x: number;
+  y: number;
+  node: 0 | 1 | 2;
+  group: 'top' | 'bot';
+  horizontal?: boolean;
+  sub: string;
+}
 
-  // Helper to render Diode or Thyristor switch symbol
-  const renderSwitch = (
-    id: string,
-    x: number,
-    y: number,
-    label: string,
-    subLabel: string,
-    pointingUp: boolean = true
-  ) => {
-    const isActive = activeDevs.includes(id);
-    const pfx = isThyristor ? 'T' : 'D';
-    const devId = `${pfx}${id.replace(/^[TD]/, '')}`;
+interface Topology {
+  devices: DeviceSpec[];
+  feeds: Record<string, Pt[]>; // source terminal -> circuit node polylines (last point = node)
+  feedClass: Record<string, string>;
+  legs: { x: number; y0: number; y1: number }[];
+  railX0: number;
+  bottomRailX0: number;
+  hasBottom: boolean;
+}
+
+const FEED_KEYS = ['A', 'B', 'C'];
+
+function buildTopology(phase: CircuitParams['phase'], rectifierType: CircuitParams['rectifierType']): Topology {
+  const topY = TOP + 50;
+  const botY = BOT - 50;
+
+  if (phase === '1phase' && rectifierType === 'halfwave') {
+    return {
+      devices: [{ n: 1, x: 230, y: TOP, node: 0, group: 'top', horizontal: true, sub: 'Series switch' }],
+      feeds: { A: [[50, 206], [50, TOP]], N: [[50, 254], [50, BOT]] },
+      feedClass: { A: 'stroke-sky-500', N: 'stroke-slate-500' },
+      legs: [],
+      railX0: 50,
+      bottomRailX0: 50,
+      hasBottom: false
+    };
+  }
+  if (phase === '1phase') {
+    return {
+      devices: [
+        { n: 1, x: 250, y: topY, node: 0, group: 'top', sub: 'Line (top)' },
+        { n: 3, x: 380, y: topY, node: 1, group: 'top', sub: 'Neutral (top)' },
+        { n: 4, x: 250, y: botY, node: 0, group: 'bot', sub: 'Line (bottom)' },
+        { n: 2, x: 380, y: botY, node: 1, group: 'bot', sub: 'Neutral (bottom)' }
+      ],
+      feeds: {
+        A: [[50, 206], [50, 200], [250, 200]],
+        N: [[50, 254], [50, 260], [380, 260]]
+      },
+      feedClass: { A: 'stroke-sky-500', N: 'stroke-slate-500' },
+      legs: [{ x: 250, y0: TOP, y1: BOT }, { x: 380, y0: TOP, y1: BOT }],
+      railX0: 250,
+      bottomRailX0: 250,
+      hasBottom: true
+    };
+  }
+  const feeds: Record<string, Pt[]> = {
+    A: [[80, 195], [220, 195]],
+    B: [[80, 230], [320, 230]],
+    C: [[80, 265], [420, 265]]
+  };
+  const feedClass = { A: 'stroke-red-500', B: 'stroke-yellow-500', C: 'stroke-blue-500', N: 'stroke-slate-500' };
+  if (rectifierType === 'halfwave') {
+    return {
+      devices: [
+        { n: 1, x: 220, y: topY, node: 0, group: 'top', sub: 'Phase A' },
+        { n: 2, x: 320, y: topY, node: 1, group: 'top', sub: 'Phase B' },
+        { n: 3, x: 420, y: topY, node: 2, group: 'top', sub: 'Phase C' }
+      ],
+      feeds: { ...feeds, N: [[53, 290], [53, BOT]] },
+      feedClass,
+      legs: [{ x: 220, y0: TOP, y1: 195 }, { x: 320, y0: TOP, y1: 230 }, { x: 420, y0: TOP, y1: 265 }],
+      railX0: 220,
+      bottomRailX0: 53,
+      hasBottom: false
+    };
+  }
+  return {
+    devices: [
+      { n: 1, x: 220, y: topY, node: 0, group: 'top', sub: 'Phase A (top)' },
+      { n: 3, x: 320, y: topY, node: 1, group: 'top', sub: 'Phase B (top)' },
+      { n: 5, x: 420, y: topY, node: 2, group: 'top', sub: 'Phase C (top)' },
+      { n: 4, x: 220, y: botY, node: 0, group: 'bot', sub: 'Phase A (bottom)' },
+      { n: 6, x: 320, y: botY, node: 1, group: 'bot', sub: 'Phase B (bottom)' },
+      { n: 2, x: 420, y: botY, node: 2, group: 'bot', sub: 'Phase C (bottom)' }
+    ],
+    feeds,
+    feedClass,
+    legs: [{ x: 220, y0: TOP, y1: BOT }, { x: 320, y0: TOP, y1: BOT }, { x: 420, y0: TOP, y1: BOT }],
+    railX0: 220,
+    bottomRailX0: 220,
+    hasBottom: true
+  };
+}
+
+const feedKey = (phase: CircuitParams['phase'], node: number) =>
+  phase === '3phase' ? FEED_KEYS[node] : node === 0 ? 'A' : 'N';
+
+/** Conventional-current path for the conducting devices. */
+function conductionPath(
+  topo: Topology,
+  phase: CircuitParams['phase'],
+  topN: number | null,
+  botN: number | null,
+  fwd: boolean
+): Pt[] {
+  if (fwd) return [[FX, BOT], [FX, TOP], [LX, TOP], [LX, BOT], [FX, BOT]];
+  const td = topo.devices.find(d => d.n === topN);
+  if (!td) return [];
+  const bd = botN !== null ? topo.devices.find(d => d.n === botN) : undefined;
+  const fT = topo.feeds[feedKey(phase, td.node)];
+  const nodeT = fT[fT.length - 1];
+
+  if (bd && bd.node === td.node) {
+    // Freewheeling inside the bridge (same leg): the source is bypassed.
+    return [nodeT, [td.x, TOP], [LX, TOP], [LX, BOT], [bd.x, BOT], nodeT];
+  }
+  const pts: Pt[] = [...fT, [td.x, TOP], [LX, TOP], [LX, BOT]];
+  if (bd) {
+    const fB = topo.feeds[feedKey(phase, bd.node)];
+    pts.push([bd.x, BOT], ...[...fB].reverse());
+  } else {
+    pts.push(...[...topo.feeds.N].reverse());
+  }
+  return pts;
+}
+
+const toPoints = (pts: Pt[]) => pts.map(p => p.join(',')).join(' ');
+
+interface SwitchProps {
+  spec: DeviceSpec;
+  isThyristor: boolean;
+  active: boolean;
+  gating: boolean;
+  onToggle: (n: number) => void;
+}
+
+const Switch: React.FC<SwitchProps> = ({ spec, isThyristor, active, gating, onToggle }) => {
+  const id = `${isThyristor ? 'T' : 'D'}${spec.n}`;
+  const lead = active ? 'stroke-emerald-400' : 'stroke-slate-500';
+  const label = `${id} (${spec.sub}) – click to switch to ${isThyristor ? 'diode' : 'thyristor'}`;
+  return (
+    <g
+      transform={`translate(${spec.x}, ${spec.y})`}
+      className="cursor-pointer outline-none group"
+      role="button"
+      tabIndex={0}
+      aria-label={label}
+      onClick={() => onToggle(spec.n)}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onToggle(spec.n);
+        }
+      }}
+    >
+      <title>{label}</title>
+      <rect x="-30" y="-30" width="60" height="60" rx="8" className="fill-transparent group-hover:fill-cyan-500/10 group-focus-visible:fill-cyan-500/10 transition-colors" />
+      {active && <circle r="27" className="fill-emerald-500/20" />}
+      <g transform={spec.horizontal ? 'rotate(90)' : undefined}>
+        <line y1="-24" y2="-10" strokeWidth="2.5" className={lead} />
+        <line y1="10" y2="24" strokeWidth="2.5" className={lead} />
+        <polygon
+          points="0,-10 -11,10 11,10"
+          strokeWidth="1.5"
+          className={active ? 'fill-emerald-500 stroke-emerald-300' : 'fill-slate-700 stroke-slate-500'}
+        />
+        <line x1="-13" y1="-10" x2="13" y2="-10" strokeWidth="2.5" strokeLinecap="round" className={active ? 'stroke-emerald-300' : 'stroke-slate-400'} />
+        {isThyristor && (
+          <>
+            <path
+              d="M -5,3 L -14,12 L -22,12"
+              fill="none"
+              strokeWidth={gating ? 2.5 : 1.5}
+              strokeLinecap="round"
+              className={gating ? 'stroke-amber-400' : active ? 'stroke-amber-500' : 'stroke-slate-500'}
+            />
+            <text x="-24" y="15" textAnchor="end" fontSize="8" fontWeight="bold" className={gating ? 'fill-amber-400' : 'fill-slate-500'}>
+              G
+            </text>
+          </>
+        )}
+      </g>
+      {spec.horizontal ? (
+        <>
+          <text y="-30" textAnchor="middle" fontSize="11" fontWeight="bold" className={active ? 'fill-emerald-300' : 'fill-slate-300'}>{id}</text>
+          <text y="42" textAnchor="middle" fontSize="9" fontWeight="bold" className={active ? 'fill-emerald-400' : 'fill-slate-500'}>{active ? 'ON' : 'OFF'}</text>
+        </>
+      ) : (
+        <>
+          <text x="20" y="-2" fontSize="11" fontWeight="bold" className={active ? 'fill-emerald-300' : 'fill-slate-300'}>{id}</text>
+          <text x="20" y="11" fontSize="9" fontWeight="bold" className={active ? 'fill-emerald-400' : 'fill-slate-500'}>{active ? 'ON' : 'OFF'}</text>
+        </>
+      )}
+    </g>
+  );
+};
+
+const signed = (x: number, digits: number, unit: string) => `${x >= 0 ? '+' : '−'}${Math.abs(x).toFixed(digits)} ${unit}`;
+
+export const CircuitSchematic: React.FC<CircuitSchematicProps> = React.memo(
+  ({ params, currentPoint, isPlaying, onToggleDevice, onToggleFwd }) => {
+    const rootRef = useRef<HTMLDivElement>(null);
+    const [isFullscreen, toggleFullscreen] = useElementFullscreen(rootRef);
+
+    const { phase, rectifierType, loadType, hasFwd, r, l, e } = params;
+    const topo = useMemo(() => buildTopology(phase, rectifierType), [phase, rectifierType]);
+    const mode = controlMode(params);
+    const activeIds = currentPoint.activeDevices;
+    const activeKey = activeIds.join(',');
+    const isFwdActive = activeIds.includes('D_FW');
+    const gating = currentPoint.gateDevices;
+
+    // Active conduction path
+    const flowPoints = useMemo(() => {
+      const nums = activeIds.filter(a => a !== 'D_FW').map(a => parseInt(a.slice(1), 10));
+      const groupOf = (n: number) => topo.devices.find(d => d.n === n)?.group;
+      const topN = nums.find(n => groupOf(n) === 'top') ?? null;
+      const botN = nums.find(n => groupOf(n) === 'bot') ?? null;
+      if (isFwdActive) return toPoints(conductionPath(topo, phase, null, null, true));
+      if (topN === null) return '';
+      return toPoints(conductionPath(topo, phase, topN, topo.hasBottom ? botN : null, false));
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeKey, topo, phase]);
+
+    const topologyBadge = `${phase === '1phase' ? '1-PHASE' : '3-PHASE'} ${rectifierType === 'fullwave' ? 'FULL-BRIDGE' : 'HALF-WAVE'}${
+      mode === 'semi' ? ' (SEMI-CONVERTER)' : mode === 'mixed' ? ' (MIXED)' : mode === 'diode' ? ' · DIODE' : ' · THYRISTOR'
+    }`;
+
+    // Load branch layout (R, L, optional E stacked between the rails)
+    const loadItems: { type: 'R' | 'L' | 'E'; h: number }[] = [{ type: 'R', h: 52 }];
+    if (loadType !== 'R') loadItems.push({ type: 'L', h: 40 });
+    if (loadType === 'RLE') loadItems.push({ type: 'E', h: 26 });
+    const sumH = loadItems.reduce((s, it) => s + it.h, 0);
+    const gap = (BOT - TOP - sumH) / (loadItems.length + 1);
+    let cursor = TOP + gap;
+    const placed = loadItems.map(it => {
+      const y = cursor;
+      cursor += it.h + gap;
+      return { ...it, y };
+    });
+
+    const mid = (TOP + BOT) / 2;
 
     return (
-      <g
-        key={id}
-        transform={`translate(${x}, ${y})`}
-        className="cursor-pointer group select-none"
-        onClick={onToggleDeviceType}
+      <div
+        ref={rootRef}
+        className={`flex flex-col bg-slate-900/90 border border-slate-800 rounded-xl overflow-hidden shadow-2xl backdrop-blur-md ${isFullscreen ? 'h-screen bg-slate-950' : 'h-full'} ${isPlaying ? '' : 'flow-paused'}`}
       >
-        {/* Glow halo when active */}
-        {isActive && (
-          <circle
-            cx="0"
-            cy="0"
-            r="32"
-            fill="rgba(16, 185, 129, 0.2)"
-            filter="blur(6px)"
-            className="animate-pulse"
-          />
-        )}
-
-        {/* Outer border box */}
-        <rect
-          x="-28"
-          y="-30"
-          width="56"
-          height="60"
-          rx="6"
-          fill={isActive ? 'rgba(6, 78, 59, 0.45)' : 'rgba(30, 41, 59, 0.4)'}
-          stroke={isActive ? '#10B981' : '#334155'}
-          strokeWidth={isActive ? '2' : '1'}
-          className="transition-all duration-200 group-hover:stroke-cyan-400"
-        />
-
-        {/* State Tag ON / OFF */}
-        <text
-          x="0"
-          y="23"
-          textAnchor="middle"
-          fontSize="9"
-          fontWeight="bold"
-          fill={isActive ? '#34D399' : '#64748B'}
-          letterSpacing="0.5"
-        >
-          {isActive ? 'ON' : 'OFF'}
-        </text>
-
-        {/* Device Label */}
-        <text
-          x="0"
-          y="-18"
-          textAnchor="middle"
-          fontSize="10"
-          fontWeight="bold"
-          fill={isActive ? '#A7F3D0' : '#94A3B8'}
-        >
-          {devId}
-        </text>
-
-        {/* Diode / Thyristor Triangle & Cathode Bar */}
-        <g transform={pointingUp ? '' : 'rotate(180)'}>
-          {/* Anode to Cathode Triangle */}
-          <polygon
-            points="0,-10 -12,8 12,8"
-            fill={isActive ? '#10B981' : '#475569'}
-            stroke={isActive ? '#34D399' : '#64748B'}
-            strokeWidth="1.5"
-          />
-          {/* Cathode horizontal bar */}
-          <line
-            x1="-13"
-            y1="-10"
-            x2="13"
-            y2="-10"
-            stroke={isActive ? '#34D399' : '#94A3B8'}
-            strokeWidth="2.5"
-            strokeLinecap="round"
-          />
-          {/* Gate pin for Thyristor */}
-          {isThyristor && (
-            <path
-              d="M -12,8 L -18,14 L -23,14"
-              fill="none"
-              stroke={isActive ? '#F59E0B' : '#64748B'}
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-          )}
-        </g>
-
-        {/* Small Gate "G" text */}
-        {isThyristor && (
-          <text
-            x="-21"
-            y="2"
-            textAnchor="end"
-            fontSize="8"
-            fill={isActive ? '#FCD34D' : '#64748B'}
-            fontWeight="bold"
-          >
-            G
-          </text>
-        )}
-
-        {/* Sub-label e.g. Phase A (Top) */}
-        <text
-          x="0"
-          y="-34"
-          textAnchor="middle"
-          fontSize="8"
-          fill="#64748B"
-          className="pointer-events-none"
-        >
-          {subLabel}
-        </text>
-      </g>
-    );
-  };
-
-  return (
-    <div className="flex flex-col h-full bg-slate-900/90 border border-slate-800 rounded-xl overflow-hidden shadow-2xl backdrop-blur-md">
-      {/* Top Header Bar */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80 bg-slate-950/60 flex-wrap gap-2">
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-            <Cpu className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800/80 bg-slate-950/60 flex-wrap gap-2">
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+              <Cpu className="w-5 h-5" />
+            </div>
+            <div>
               <h2 className="text-sm font-bold text-slate-100 tracking-wide">Circuit Schematic Diagram</h2>
-              <span className="px-2 py-0.5 text-[10px] font-mono tracking-wider font-semibold rounded-full bg-cyan-950/80 text-cyan-400 border border-cyan-500/40">
+              <span className="inline-block mt-0.5 px-2 py-0.5 text-[10px] font-mono tracking-wider font-semibold rounded-full bg-cyan-950/80 text-cyan-400 border border-cyan-500/40">
                 {topologyBadge}
               </span>
             </div>
-            <p className="text-[11px] text-slate-400">
-              Click any device to switch Diode <span className="text-cyan-400 font-semibold">(D)</span> ↔ Thyristor <span className="text-amber-400 font-semibold">(T)</span>.
-            </p>
           </div>
+          <button
+            onClick={toggleFullscreen}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-slate-400 hover:text-slate-100 bg-slate-800/60 hover:bg-slate-800 rounded-lg border border-slate-700/50 transition-colors"
+            title={isFullscreen ? 'Exit full screen' : 'Full screen'}
+          >
+            {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+            <span>{isFullscreen ? 'Exit' : 'Full Screen'}</span>
+          </button>
         </div>
 
-        {/* Active Loop Status Badge */}
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-950/50 border border-emerald-500/30 text-emerald-300 text-xs font-medium">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+        <div className="px-4 py-2 border-b border-slate-800/60 bg-emerald-950/30">
+          <div className="flex items-center gap-2 text-emerald-300 min-w-0">
+            <span className="relative flex h-2 w-2 shrink-0">
+              <span className={`${isPlaying ? 'animate-ping' : ''} absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75`} />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
             </span>
-            <div className="flex flex-col">
-              <span className="text-[9px] uppercase tracking-wider text-emerald-400/80 font-bold">Active Current Loop</span>
-              <span className="text-xs font-semibold text-emerald-200">{currentPoint.loopDescription}</span>
-            </div>
+            <span className="text-[9px] uppercase tracking-wider text-emerald-400/80 font-bold shrink-0">Active conduction</span>
+            <span className="text-xs font-semibold text-emerald-200 truncate" title={currentPoint.loopDescription}>
+              {currentPoint.loopDescription}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex-1 lg:min-h-[360px] p-2 flex flex-col items-center justify-center bg-radial from-slate-900 to-slate-950 overflow-x-auto">
+          <div className="w-full flex items-center gap-2 px-2 text-[11px] text-slate-400 flex-wrap">
+            <Lightbulb className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span>Click a switch to toggle <b className="text-cyan-400">Diode (D)</b> ↔ <b className="text-amber-400">Thyristor (T)</b>.</span>
+            <span className="inline-flex items-center gap-1 ml-auto"><i className="w-3 h-0.5 bg-emerald-400 inline-block" />Live current</span>
+            <span className="inline-flex items-center gap-1"><i className="w-3 h-0.5 bg-slate-500 inline-block" />Blocking</span>
           </div>
 
-          {onToggleFullScreen && (
-            <button
-              onClick={onToggleFullScreen}
-              className="p-1.5 text-slate-400 hover:text-slate-100 bg-slate-800/60 hover:bg-slate-800 rounded-lg border border-slate-700/50 transition-colors"
-              title={isFullScreen ? 'Exit Full Screen' : 'Full Screen'}
+          <svg viewBox="0 0 760 420" className="w-full min-w-[600px] h-auto max-h-[480px] select-none" role="img" aria-label={`Schematic of a ${topologyBadge} rectifier`}>
+            <defs>
+              <pattern id="circuitGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                <circle cx="2" cy="2" r="0.75" className="fill-slate-800" />
+              </pattern>
+            </defs>
+            <rect width="760" height="420" fill="url(#circuitGrid)" />
+
+            {/* Static wiring */}
+            <g fill="none" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="stroke-slate-600">
+              <polyline points={`${topo.railX0},${TOP} ${LX},${TOP}`} />
+              <polyline points={`${topo.bottomRailX0},${BOT} ${LX},${BOT}`} />
+              {topo.legs.map(leg => (
+                <line key={leg.x} x1={leg.x} y1={leg.y0} x2={leg.x} y2={leg.y1} strokeWidth="2.5" />
+              ))}
+              {Object.entries(topo.feeds).map(([k, pts]) => (
+                <polyline key={k} points={toPoints(pts)} strokeWidth="2.5" className={topo.feedClass[k]} />
+              ))}
+            </g>
+
+            {/* Freewheeling diode branch */}
+            <g
+              className="cursor-pointer outline-none group"
+              role="button"
+              tabIndex={0}
+              aria-label={`Freewheeling diode – click to ${hasFwd ? 'remove' : 'add'}`}
+              onClick={onToggleFwd}
+              onKeyDown={ev => {
+                if (ev.key === 'Enter' || ev.key === ' ') {
+                  ev.preventDefault();
+                  onToggleFwd();
+                }
+              }}
             >
-              <Maximize2 className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* SVG Canvas Container */}
-      <div className="flex-1 w-full min-h-[380px] p-2 relative bg-radial from-slate-900 to-slate-950 flex items-center justify-center overflow-hidden">
-        {/* Animated Background Grid Pattern */}
-        <svg
-          viewBox="0 0 760 420"
-          className="w-full h-full max-h-[460px] object-contain drop-shadow-xl"
-          preserveAspectRatio="xMidYMid meet"
-        >
-          <defs>
-            <pattern id="circuitGrid" width="20" height="20" patternUnits="userSpaceOnUse">
-              <circle cx="2" cy="2" r="0.75" fill="#1e293b" />
-            </pattern>
-            {/* Glow filters */}
-            <filter id="wireGlow" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="3" result="blur" />
-              <feComposite in="SourceGraphic" in2="blur" operator="over" />
-            </filter>
-            <filter id="activePathGlow" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="4" result="blur" />
-              <feMerge>
-                <feMergeNode in="blur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-          </defs>
-
-          {/* Grid Background */}
-          <rect width="760" height="420" fill="url(#circuitGrid)" />
-
-          {/* ========================================================
-              SINGLE-PHASE FULL-WAVE BRIDGE SCHEMATIC
-             ======================================================== */}
-          {phase === '1phase' && rectifierType === 'fullwave' && (
-            <g>
-              {/* Positive Top Rail: (140, 140) -> (360, 140) -> (580, 140) */}
-              <line x1="180" y1="140" x2="580" y2="140" stroke="#334155" strokeWidth="3" strokeLinecap="round" />
-              {/* Negative Bottom Rail: (180, 280) -> (580, 280) */}
-              <line x1="180" y1="280" x2="580" y2="280" stroke="#334155" strokeWidth="3" strokeLinecap="round" />
-
-              {/* Bridge Left Branch (Phase A): (180, 140) to (180, 280) */}
-              <line x1="180" y1="140" x2="180" y2="280" stroke="#334155" strokeWidth="2.5" />
-              {/* Bridge Right Branch (Neutral): (260, 140) to (260, 280) */}
-              <line x1="260" y1="140" x2="260" y2="280" stroke="#334155" strokeWidth="2.5" />
-
-              {/* Source AC Connections */}
-              {/* Line from AC Source Top to (180, 210) midpoint */}
-              <path d="M 90,200 L 115,200 L 115,185 L 180,185" fill="none" stroke="#0ea5e9" strokeWidth="2.5" />
-              {/* Line from AC Source Bottom to (260, 235) midpoint */}
-              <path d="M 90,220 L 115,220 L 115,235 L 260,235" fill="none" stroke="#64748b" strokeWidth="2.5" />
-
-              {/* Active current path glows when conducting */}
-              {activeDevs.includes('T1') || activeDevs.includes('D1') ? (
-                <g filter="url(#activePathGlow)">
-                  <path
-                    d="M 90,200 L 115,200 L 115,185 L 180,185 L 180,140 L 580,140 L 580,210 L 580,280 L 260,280 L 260,235 L 115,235 L 115,220 L 90,220"
-                    fill="none"
-                    stroke="#10b981"
-                    strokeWidth="3.5"
-                    strokeDasharray="8 6"
-                    className="animate-[dash_1.5s_linear_infinite]"
-                  />
-                </g>
-              ) : null}
-
-              {activeDevs.includes('T3') || activeDevs.includes('D3') ? (
-                <g filter="url(#activePathGlow)">
-                  <path
-                    d="M 90,220 L 115,220 L 115,235 L 260,235 L 260,140 L 580,140 L 580,210 L 580,280 L 180,280 L 180,185 L 115,185 L 115,200 L 90,200"
-                    fill="none"
-                    stroke="#10b981"
-                    strokeWidth="3.5"
-                    strokeDasharray="8 6"
-                    className="animate-[dash_1.5s_linear_infinite]"
-                  />
-                </g>
-              ) : null}
-
-              {/* Freewheeling Diode Branch */}
+              <title>{hasFwd ? 'Freewheeling diode fitted – click to remove' : 'Click to add a freewheeling diode across the load'}</title>
+              <rect x={FX - 30} y={TOP + 30} width="60" height={BOT - TOP - 60} className="fill-transparent group-hover:fill-cyan-500/10 group-focus-visible:fill-cyan-500/10" />
               <line
-                x1="400"
-                y1="140"
-                x2="400"
-                y2="280"
-                stroke={isFwdActive ? '#10b981' : hasFwd ? '#475569' : '#1e293b'}
-                strokeWidth={isFwdActive ? '3' : '1.5'}
-                strokeDasharray={hasFwd ? undefined : '4 4'}
+                x1={FX} y1={TOP} x2={FX} y2={BOT}
+                strokeWidth={hasFwd ? 2.5 : 1.5}
+                strokeDasharray={hasFwd ? undefined : '5 5'}
+                className={isFwdActive ? 'stroke-emerald-400' : hasFwd ? 'stroke-slate-500' : 'stroke-slate-700'}
               />
-              <g
-                transform="translate(400, 210)"
-                onClick={onToggleFwd}
-                className="cursor-pointer group"
-              >
-                <circle
-                  cx="0"
-                  cy="0"
-                  r="22"
-                  fill={isFwdActive ? 'rgba(16, 185, 129, 0.3)' : 'rgba(30, 41, 59, 0.4)'}
-                  stroke={isFwdActive ? '#10b981' : hasFwd ? '#64748b' : '#334155'}
-                  strokeWidth="1.5"
-                />
-                <polygon
-                  points="0,-8 -9,7 9,7"
-                  fill={isFwdActive ? '#10b981' : hasFwd ? '#475569' : '#334155'}
-                  stroke={isFwdActive ? '#34d399' : hasFwd ? '#64748b' : '#334155'}
-                  strokeWidth="1.5"
-                />
-                <line
-                  x1="-10"
-                  y1="-8"
-                  x2="10"
-                  y2="-8"
-                  stroke={isFwdActive ? '#34d399' : hasFwd ? '#94a3b8' : '#475569'}
-                  strokeWidth="2"
-                />
-                <text x="0" y="-14" textAnchor="middle" fontSize="9" fill={hasFwd ? '#94a3b8' : '#475569'} fontWeight="bold">
-                  D_FW
-                </text>
-                <text x="0" y="19" textAnchor="middle" fontSize="7" fill={isFwdActive ? '#34d399' : hasFwd ? '#64748b' : '#334155'}>
-                  {isFwdActive ? 'FWD ON' : hasFwd ? 'FWD' : 'OFF'}
+              <g transform={`translate(${FX}, ${mid})`} opacity={hasFwd ? 1 : 0.55}>
+                <rect x="-16" y="-20" width="32" height="40" className="fill-slate-900" />
+                <polygon points="0,-10 -11,10 11,10" strokeWidth="1.5" className={isFwdActive ? 'fill-emerald-500 stroke-emerald-300' : 'fill-slate-700 stroke-slate-500'} />
+                <line x1="-13" y1="-10" x2="13" y2="-10" strokeWidth="2.5" strokeLinecap="round" className={isFwdActive ? 'stroke-emerald-300' : 'stroke-slate-400'} />
+                <text x="20" y="-2" fontSize="11" fontWeight="bold" className={isFwdActive ? 'fill-emerald-300' : 'fill-slate-400'}>D_FW</text>
+                <text x="20" y="11" fontSize="9" fontWeight="bold" className={isFwdActive ? 'fill-emerald-400' : 'fill-slate-500'}>
+                  {isFwdActive ? 'ON' : hasFwd ? 'OFF' : 'not fitted'}
                 </text>
               </g>
-
-              {/* Switches */}
-              {/* T1 (Top Left, Phase A) */}
-              {renderSwitch('T1', 180, 140, isThyristor ? 'T1' : 'D1', 'Ph A (Top)', true)}
-              {/* T4 (Bottom Left, Phase A) */}
-              {renderSwitch('T4', 180, 280, isThyristor ? 'T4' : 'D4', 'Ph A (Bot)', true)}
-              {/* T3 (Top Right, Neutral) */}
-              {renderSwitch('T3', 260, 140, isThyristor ? 'T3' : 'D3', 'Neut (Top)', true)}
-              {/* T2 (Bottom Right, Neutral) */}
-              {renderSwitch('T2', 260, 280, isThyristor ? 'T2' : 'D2', 'Neut (Bot)', true)}
-
-              {/* Wire Node Junctions */}
-              <circle cx="180" cy="185" r="3.5" fill="#0ea5e9" />
-              <circle cx="260" cy="235" r="3.5" fill="#64748b" />
-              <circle cx="400" cy="140" r="3" fill="#64748b" />
-              <circle cx="400" cy="280" r="3" fill="#64748b" />
-              <circle cx="580" cy="140" r="3.5" fill="#10b981" />
-              <circle cx="580" cy="280" r="3.5" fill="#10b981" />
-
-              {/* Terminal Labels */}
-              <text x="600" y="144" fontSize="11" fontWeight="bold" fill="#34d399">
-                + Vo ({voText})
-              </text>
-              <text x="600" y="284" fontSize="11" fontWeight="bold" fill="#64748b">
-                - Vo (GND)
-              </text>
-
-              {/* Phase Wire labels */}
-              <text x="135" y="178" fontSize="9" fill="#38bdf8" fontWeight="bold">
-                Phase A
-              </text>
-              <text x="135" y="248" fontSize="9" fill="#94a3b8" fontWeight="bold">
-                Neutral (N)
-              </text>
             </g>
-          )}
+            <circle cx={FX} cy={TOP} r="3.5" className="fill-slate-500" />
+            <circle cx={FX} cy={BOT} r="3.5" className="fill-slate-500" />
 
-          {/* ========================================================
-              SINGLE-PHASE HALF-WAVE SCHEMATIC
-             ======================================================== */}
-          {phase === '1phase' && rectifierType === 'halfwave' && (
-            <g>
-              {/* Top rail: AC Source -> Diode/Thyristor T1 -> Load */}
-              <line x1="90" y1="160" x2="220" y2="160" stroke="#0ea5e9" strokeWidth="2.5" />
-              <line x1="220" y1="160" x2="580" y2="160" stroke="#334155" strokeWidth="3" />
-              {/* Bottom return rail */}
-              <line x1="90" y1="280" x2="580" y2="280" stroke="#64748b" strokeWidth="2.5" />
-
-              {/* Active path glow */}
-              {(activeDevs.includes('T1') || activeDevs.includes('D1')) && (
-                <g filter="url(#activePathGlow)">
-                  <path
-                    d="M 90,160 L 580,160 L 580,280 L 90,280"
-                    fill="none"
-                    stroke="#10b981"
-                    strokeWidth="3.5"
-                    strokeDasharray="8 6"
-                    className="animate-[dash_1.5s_linear_infinite]"
-                  />
-                </g>
-              )}
-
-              {/* Freewheeling diode */}
-              <line
-                x1="400"
-                y1="160"
-                x2="400"
-                y2="280"
-                stroke={isFwdActive ? '#10b981' : hasFwd ? '#475569' : '#1e293b'}
-                strokeWidth={isFwdActive ? '3' : '1.5'}
-                strokeDasharray={hasFwd ? undefined : '4 4'}
-              />
-              <g
-                transform="translate(400, 220)"
-                onClick={onToggleFwd}
-                className="cursor-pointer group"
-              >
-                <circle
-                  cx="0"
-                  cy="0"
-                  r="20"
-                  fill={isFwdActive ? 'rgba(16, 185, 129, 0.3)' : 'rgba(30, 41, 59, 0.4)'}
-                  stroke={isFwdActive ? '#10b981' : hasFwd ? '#64748b' : '#334155'}
-                  strokeWidth="1.5"
-                />
-                <polygon
-                  points="0,-8 -8,7 8,7"
-                  fill={isFwdActive ? '#10b981' : hasFwd ? '#475569' : '#334155'}
-                  stroke={isFwdActive ? '#34d399' : hasFwd ? '#64748b' : '#334155'}
-                  strokeWidth="1.5"
-                />
-                <line
-                  x1="-9"
-                  y1="-8"
-                  x2="9"
-                  y2="-8"
-                  stroke={isFwdActive ? '#34d399' : hasFwd ? '#94a3b8' : '#475569'}
-                  strokeWidth="2"
-                />
-                <text x="0" y="-12" textAnchor="middle" fontSize="8" fill={hasFwd ? '#94a3b8' : '#475569'} fontWeight="bold">
-                  D_FW
-                </text>
-              </g>
-
-              {/* Single Switch T1 */}
-              {renderSwitch('T1', 250, 160, isThyristor ? 'T1' : 'D1', 'Series Switch', false)}
-
-              <text x="600" y="164" fontSize="11" fontWeight="bold" fill="#34d399">
-                + Vo ({voText})
-              </text>
-              <text x="600" y="284" fontSize="11" fontWeight="bold" fill="#64748b">
-                - Vo (GND)
-              </text>
-            </g>
-          )}
-
-          {/* ========================================================
-              THREE-PHASE FULL-WAVE BRIDGE (6-PULSE) SCHEMATIC
-             ======================================================== */}
-          {phase === '3phase' && rectifierType === 'fullwave' && (
-            <g>
-              {/* Top Positive DC Bus */}
-              <line x1="180" y1="120" x2="580" y2="120" stroke="#334155" strokeWidth="3" />
-              {/* Bottom Negative DC Bus */}
-              <line x1="180" y1="300" x2="580" y2="300" stroke="#334155" strokeWidth="3" />
-
-              {/* 3 Legs: Leg A (200), Leg B (280), Leg C (360) */}
-              <line x1="200" y1="120" x2="200" y2="300" stroke="#334155" strokeWidth="2.5" />
-              <line x1="280" y1="120" x2="280" y2="300" stroke="#334155" strokeWidth="2.5" />
-              <line x1="360" y1="120" x2="360" y2="300" stroke="#334155" strokeWidth="2.5" />
-
-              {/* 3-Phase AC Infeed lines */}
-              {/* Phase A */}
-              <path d="M 80,180 L 140,180 L 140,210 L 200,210" fill="none" stroke="#ef4444" strokeWidth="2.5" />
-              {/* Phase B */}
-              <path d="M 80,210 L 280,210" fill="none" stroke="#eab308" strokeWidth="2.5" />
-              {/* Phase C */}
-              <path d="M 80,240 L 140,240 L 140,210 L 360,210" fill="none" stroke="#3b82f6" strokeWidth="2.5" />
-
-              {/* Top Switches: T1 (Ph A), T3 (Ph B), T5 (Ph C) */}
-              {renderSwitch('T1', 200, 120, isThyristor ? 'T1' : 'D1', 'Ph A (Top)', true)}
-              {renderSwitch('T3', 280, 120, isThyristor ? 'T3' : 'D3', 'Ph B (Top)', true)}
-              {renderSwitch('T5', 360, 120, isThyristor ? 'T5' : 'D5', 'Ph C (Top)', true)}
-
-              {/* Bottom Switches: T4 (Ph A), T6 (Ph B), T2 (Ph C) */}
-              {renderSwitch('T4', 200, 300, isThyristor ? 'T4' : 'D4', 'Ph A (Bot)', true)}
-              {renderSwitch('T6', 280, 300, isThyristor ? 'T6' : 'D6', 'Ph B (Bot)', true)}
-              {renderSwitch('T2', 360, 300, isThyristor ? 'T2' : 'D2', 'Ph C (Bot)', true)}
-
-              {/* Active conduction loop glow */}
-              {activeDevs.length >= 2 && (
-                <g filter="url(#activePathGlow)">
-                  <path
-                    d="M 200,120 L 580,120 L 580,300 L 200,300"
-                    fill="none"
-                    stroke="#10b981"
-                    strokeWidth="3.5"
-                    strokeDasharray="8 6"
-                    className="animate-[dash_1.5s_linear_infinite]"
-                  />
-                </g>
-              )}
-
-              {/* Phase labels */}
-              <text x="90" y="174" fontSize="9" fill="#ef4444" fontWeight="bold">Phase A (R)</text>
-              <text x="90" y="204" fontSize="9" fill="#eab308" fontWeight="bold">Phase B (Y)</text>
-              <text x="90" y="234" fontSize="9" fill="#3b82f6" fontWeight="bold">Phase C (B)</text>
-
-              <text x="600" y="124" fontSize="11" fontWeight="bold" fill="#34d399">+ Vo ({voText})</text>
-              <text x="600" y="304" fontSize="11" fontWeight="bold" fill="#64748b">- Vo (GND)</text>
-            </g>
-          )}
-
-          {/* ========================================================
-              THREE-PHASE HALF-WAVE (3-PULSE) SCHEMATIC
-             ======================================================== */}
-          {phase === '3phase' && rectifierType === 'halfwave' && (
-            <g>
-              {/* Positive Top Bus */}
-              <line x1="220" y1="140" x2="580" y2="140" stroke="#334155" strokeWidth="3" />
-              {/* Neutral Return Bus */}
-              <line x1="60" y1="300" x2="580" y2="300" stroke="#64748b" strokeWidth="2.5" />
-
-              {/* Phase inputs */}
-              <path d="M 80,160 L 220,160 L 220,140" fill="none" stroke="#ef4444" strokeWidth="2.5" />
-              <path d="M 80,200 L 300,200 L 300,140" fill="none" stroke="#eab308" strokeWidth="2.5" />
-              <path d="M 80,240 L 380,240 L 380,140" fill="none" stroke="#3b82f6" strokeWidth="2.5" />
-
-              {/* Switches */}
-              {renderSwitch('T1', 220, 140, isThyristor ? 'T1' : 'D1', 'Phase A', true)}
-              {renderSwitch('T2', 300, 140, isThyristor ? 'T2' : 'D2', 'Phase B', true)}
-              {renderSwitch('T3', 380, 140, isThyristor ? 'T3' : 'D3', 'Phase C', true)}
-
-              <text x="90" y="154" fontSize="9" fill="#ef4444" fontWeight="bold">Phase A</text>
-              <text x="90" y="194" fontSize="9" fill="#eab308" fontWeight="bold">Phase B</text>
-              <text x="90" y="234" fontSize="9" fill="#3b82f6" fontWeight="bold">Phase C</text>
-              <text x="90" y="294" fontSize="9" fill="#94a3b8" fontWeight="bold">Neutral Star (N)</text>
-
-              <text x="600" y="144" fontSize="11" fontWeight="bold" fill="#34d399">+ Vo ({voText})</text>
-              <text x="600" y="304" fontSize="11" fontWeight="bold" fill="#64748b">- Vo (Star N)</text>
-            </g>
-          )}
-
-          {/* ========================================================
-              AC SOURCE SYMBOL (Left Side)
-             ======================================================== */}
-          {phase === '1phase' ? (
-            <g transform="translate(60, 210)">
-              {/* Outer AC Source Circle */}
-              <circle
-                cx="0"
-                cy="0"
-                r="24"
-                fill="#0f172a"
-                stroke="#0ea5e9"
-                strokeWidth="2"
-                className="drop-shadow-md"
-              />
-              {/* Sinewave path symbol */}
-              <path
-                d="M -14,0 Q -7,-14 0,0 Q 7,14 14,0"
-                fill="none"
-                stroke="#38bdf8"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-              />
-              {/* AC Source label & instantaneous voltage */}
-              <text x="0" y="38" textAnchor="middle" fontSize="10" fontWeight="bold" fill="#f8fafc">
-                AC Source
-              </text>
-              <text x="0" y="50" textAnchor="middle" fontSize="9" fill="#38bdf8" fontFamily="monospace">
-                vs = {vsText}
-              </text>
-            </g>
-          ) : (
-            <g transform="translate(45, 210)">
-              <circle cx="0" cy="0" r="24" fill="#0f172a" stroke="#6366f1" strokeWidth="2" />
-              <text x="0" y="-4" textAnchor="middle" fontSize="11" fontWeight="bold" fill="#a5b4fc">
-                3Φ
-              </text>
-              <text x="0" y="8" textAnchor="middle" fontSize="8" fill="#818cf8">
-                Supply
-              </text>
-              <text x="0" y="38" textAnchor="middle" fontSize="9" fill="#94a3b8" fontFamily="monospace">
-                va = {vsText}
-              </text>
-            </g>
-          )}
-
-          {/* ========================================================
-              LOAD BOX (Right Side)
-             ======================================================== */}
-          <g transform={`translate(580, ${phase === '3phase' && rectifierType === 'fullwave' ? 210 : 210})`}>
-            {/* Load Outer Enclosure */}
-            <rect
-              x="-24"
-              y="-55"
-              width="48"
-              height="110"
-              rx="10"
-              fill="rgba(15, 23, 42, 0.9)"
-              stroke="#0284c7"
-              strokeWidth="2"
-              className="drop-shadow-lg"
-            />
-
-            {/* Load Type Badge Header */}
-            <rect x="-20" y="-50" width="40" height="15" rx="3" fill="#0369a1" />
-            <text x="0" y="-39" textAnchor="middle" fontSize="9" fontWeight="bold" fill="#e0f2fe">
-              {loadType} Load
-            </text>
-
-            {/* Resistor zigzag symbol */}
-            <path
-              d="M -12,-25 L -6,-21 L 6,-29 L -6,-33 L 6,-37 L 0,-40"
-              fill="none"
-              stroke="#fbbf24"
-              strokeWidth="2"
-            />
-            <text x="0" y="-12" textAnchor="middle" fontSize="8" fill="#fde68a" fontWeight="semibold">
-              R = {r} Ω
-            </text>
-
-            {/* Inductor coils symbol (if RL or RLE) */}
-            {loadType !== 'R' && (
-              <g transform="translate(0, 8)">
-                <path
-                  d="M -14,0 A 5,5 0 0,1 -4,0 A 5,5 0 0,1 6,0 A 5,5 0 0,1 14,0"
-                  fill="none"
-                  stroke="#38bdf8"
-                  strokeWidth="2"
-                />
-                <text x="0" y="14" textAnchor="middle" fontSize="8" fill="#bae6fd" fontWeight="semibold">
-                  L = {l} mH
-                </text>
+            {/* Live current flow */}
+            {flowPoints && (
+              <g fill="none" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points={flowPoints} strokeWidth="9" className="stroke-emerald-500/20" />
+                <polyline points={flowPoints} strokeWidth="3.5" strokeDasharray="8 6" className="flow-path stroke-emerald-400" />
               </g>
             )}
 
-            {/* DC Source Back-EMF E (if RLE) */}
-            {loadType === 'RLE' && (
-              <g transform="translate(0, 32)">
-                <line x1="-12" y1="-2" x2="12" y2="-2" stroke="#ef4444" strokeWidth="2.5" />
-                <line x1="-6" y1="4" x2="6" y2="4" stroke="#94a3b8" strokeWidth="2" />
-                <text x="0" y="16" textAnchor="middle" fontSize="8" fill="#fca5a5" fontWeight="semibold">
-                  E = {e} V
-                </text>
+            {/* Switches */}
+            {topo.devices.map(d => {
+              const isT = deviceTypeOf(params, d.n) === 'thyristor';
+              const id = `${isT ? 'T' : 'D'}${d.n}`;
+              return (
+                <Switch
+                  key={d.n}
+                  spec={d}
+                  isThyristor={isT}
+                  active={activeIds.includes(id)}
+                  gating={gating.includes(id)}
+                  onToggle={onToggleDevice}
+                />
+              );
+            })}
+
+            {/* Node dots */}
+            {Object.values(topo.feeds).map((pts, k) => (
+              <circle key={k} cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r="3.5" className="fill-slate-300" />
+            ))}
+            <circle cx={LX} cy={TOP} r="3.5" className="fill-emerald-500" />
+            <circle cx={LX} cy={BOT} r="3.5" className="fill-emerald-500" />
+
+            {/* Source */}
+            {phase === '1phase' ? (
+              <g transform="translate(50, 230)">
+                <circle r="24" strokeWidth="2" className="fill-slate-900 stroke-sky-500" />
+                <path d="M -14,0 Q -7,-14 0,0 Q 7,14 14,0" fill="none" strokeWidth="2.5" strokeLinecap="round" className="stroke-sky-400" />
+                <text y="42" textAnchor="middle" fontSize="10" fontWeight="bold" className="fill-slate-200">AC Source</text>
+                <text y="55" textAnchor="middle" fontSize="9" fontFamily="monospace" className="fill-sky-400">vs = {signed(currentPoint.vs, 1, 'V')}</text>
+              </g>
+            ) : (
+              <g>
+                <rect x="26" y="170" width="54" height="120" rx="10" strokeWidth="2" className="fill-slate-900 stroke-indigo-500" />
+                <text x="53" y="226" textAnchor="middle" fontSize="12" fontWeight="bold" className="fill-indigo-300">3Φ</text>
+                <text x="53" y="240" textAnchor="middle" fontSize="8" className="fill-indigo-400">{params.vRms} V L-L</text>
+                {[['A', 195, 'fill-red-500'], ['B', 230, 'fill-yellow-500'], ['C', 265, 'fill-blue-500']].map(([k, y, c]) => (
+                  <text key={k as string} x="70" y={(y as number) + 3} textAnchor="end" fontSize="9" fontWeight="bold" className={c as string}>{k}</text>
+                ))}
+                {rectifierType === 'halfwave' && <text x="53" y="284" textAnchor="middle" fontSize="9" fontWeight="bold" className="fill-slate-400">N</text>}
+                <text x="53" y="318" textAnchor="middle" fontSize="8.5" fontFamily="monospace" className="fill-red-400">va {signed(currentPoint.vs, 0, 'V')}</text>
+                <text x="53" y="330" textAnchor="middle" fontSize="8.5" fontFamily="monospace" className="fill-yellow-500">vb {signed(currentPoint.vsB ?? 0, 0, 'V')}</text>
+                <text x="53" y="342" textAnchor="middle" fontSize="8.5" fontFamily="monospace" className="fill-blue-400">vc {signed(currentPoint.vsC ?? 0, 0, 'V')}</text>
               </g>
             )}
 
-            {/* Live Current Badge */}
-            <rect
-              x="-35"
-              y="62"
-              width="70"
-              height="20"
-              rx="5"
-              fill="#064e3b"
-              stroke="#059669"
-              strokeWidth="1.5"
-            />
-            <text
-              x="0"
-              y="75"
-              textAnchor="middle"
-              fontSize="9"
-              fontFamily="monospace"
-              fontWeight="bold"
-              fill="#34d399"
-            >
-              i = {ioText} ▶
+            {/* Load branch */}
+            <g transform={`translate(${LX}, 0)`}>
+              <line x1="0" y1={TOP} x2="0" y2={BOT} strokeWidth="2.5" className="stroke-slate-600" />
+              {placed.map(it => (
+                <g key={it.type} transform={`translate(0, ${it.y})`}>
+                  <rect x="-14" y="-2" width="28" height={it.h + 4} className="fill-slate-900" />
+                  {it.type === 'R' && (
+                    <>
+                      <path d={`M 0,0 L 0,5 L -9,10 L 9,18 L -9,26 L 9,34 L -9,42 L 0,47 L 0,${it.h}`} fill="none" strokeWidth="2" strokeLinejoin="round" className="stroke-amber-400" />
+                      <text x="18" y={it.h / 2 + 3} fontSize="10" fontWeight="600" className="fill-amber-300">R = {r} Ω</text>
+                    </>
+                  )}
+                  {it.type === 'L' && (
+                    <>
+                      <path d="M 0,0 L 0,4 A 6,6 0 0 1 0,16 A 6,6 0 0 1 0,28 A 6,6 0 0 1 0,40" fill="none" strokeWidth="2" className="stroke-sky-400" />
+                      <text x="18" y={it.h / 2 + 3} fontSize="10" fontWeight="600" className="fill-sky-300">L = {l} mH</text>
+                    </>
+                  )}
+                  {it.type === 'E' && (
+                    <>
+                      <line x1="0" y1="0" x2="0" y2="9" strokeWidth="2" className="stroke-red-400" />
+                      <line x1="-12" y1="9" x2="12" y2="9" strokeWidth="3" className="stroke-red-400" />
+                      <line x1="-6" y1="16" x2="6" y2="16" strokeWidth="2.5" className="stroke-slate-400" />
+                      <line x1="0" y1="16" x2="0" y2={it.h} strokeWidth="2" className="stroke-slate-400" />
+                      <text x="18" y="16" fontSize="10" fontWeight="600" className="fill-red-300">E = {e} V</text>
+                    </>
+                  )}
+                </g>
+              ))}
+              <rect x="-36" y={BOT + 14} width="86" height="20" rx="5" strokeWidth="1.5" className="fill-emerald-950 stroke-emerald-600" />
+              <text x="7" y={BOT + 28} textAnchor="middle" fontSize="10" fontFamily="monospace" fontWeight="bold" className="fill-emerald-400">
+                i = {currentPoint.io.toFixed(2)} A ▼
+              </text>
+            </g>
+            <text x={LX - 8} y={TOP - 12} textAnchor="end" fontSize="11" fontWeight="bold" className="fill-emerald-400">
+              + Vo ({signed(currentPoint.vo, 1, 'V')})
             </text>
-          </g>
-        </svg>
-      </div>
+            <text x={LX - 8} y={BOT - 8} textAnchor="end" fontSize="11" fontWeight="bold" className="fill-slate-400">
+              − Vo
+            </text>
+          </svg>
+        </div>
 
-      {/* Footer Hint Bar */}
-      <div className="px-4 py-2 bg-slate-950/80 border-t border-slate-800 text-[11px] text-slate-400 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Zap className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-          <span>
-            {isThyristor ? 'Thyristor Gate Triggered mode' : 'Natural Diode Commutation mode'}
-            {hasFwd && ' • Freewheeling Diode (FWD) Active'}
-          </span>
-        </div>
-        <div className="text-slate-500 font-mono text-[10px]">
-          Live Angle: <span className="text-cyan-400 font-bold">{currentPoint.deg.toFixed(1)}°</span>
+        <div className="px-4 py-2 bg-slate-950/80 border-t border-slate-800 text-[11px] text-slate-400 flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <Zap className="w-3.5 h-3.5 text-amber-400" />
+            <span>
+              {mode === 'diode' && 'Natural diode commutation'}
+              {mode === 'full' && 'Thyristor gate-triggered (fully controlled)'}
+              {mode === 'semi' && 'Half-controlled bridge (semi-converter)'}
+              {mode === 'mixed' && 'Mixed diode / thyristor bridge'}
+              {' • '}
+              <span className={isFwdActive ? 'text-emerald-400 font-semibold' : ''}>
+                FWD: {isFwdActive ? 'conducting' : hasFwd ? 'fitted (idle)' : 'not fitted'}
+              </span>
+            </span>
+          </div>
+          <div className="font-mono text-[10px]">
+            ωt = <span className="text-cyan-400 font-bold">{(currentPoint.deg % 360).toFixed(1)}°</span>
+          </div>
         </div>
       </div>
-    </div>
-  );
-};
+    );
+  }
+);
+CircuitSchematic.displayName = 'CircuitSchematic';
